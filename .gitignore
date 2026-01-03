@@ -1,0 +1,34 @@
+# Environment variables
+.env
+
+# Data files
+data.json
+numbers.json
+
+# Node modules
+node_modules/
+frontend/node_modules/
+
+# Build files
+frontend/build/
+frontend/.pnp
+frontend/.pnp.js
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+coverage/

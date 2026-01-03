@@ -1,0 +1,56 @@
+.home {
+  padding: 20px 16px;
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.header h1 {
+  font-size: 28px;
+  margin-bottom: 8px;
+  color: var(--tg-theme-text-color, #000000);
+}
+
+.header p {
+  color: var(--tg-theme-hint-color, #666666);
+  font-size: 14px;
+}
+
+.menu-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.menu-card {
+  background: var(--tg-theme-bg-color, #ffffff);
+  border: 1px solid var(--tg-theme-hint-color, #e0e0e0);
+  border-radius: 12px;
+  padding: 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.menu-card:active {
+  transform: scale(0.98);
+}
+
+.menu-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+.menu-card h3 {
+  font-size: 16px;
+  margin-bottom: 8px;
+  color: var(--tg-theme-text-color, #000000);
+}
+
+.menu-card p {
+  font-size: 12px;
+  color: var(--tg-theme-hint-color, #666666);
+}
+
