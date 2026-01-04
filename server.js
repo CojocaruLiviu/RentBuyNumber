@@ -6,6 +6,7 @@ const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const REACT_APP_API_URL = process.env.REACT_APP_API_URL || `smsback.workdomain.site`;
 const HERO_SMS_API_KEY = process.env.HERO_SMS_API_KEY;
 const HERO_SMS_API_URL = process.env.HERO_SMS_API_URL || "https://hero-sms.com/stubs/handler_api.php";
 
@@ -1084,6 +1085,7 @@ app.get("*", (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📱 Mini App URL: http://localhost:${PORT}`);
+    console.log(`📱 Mini App Env: ${REACT_APP_API_URL}`);
     console.log(`🔗 API URL: ${HERO_SMS_API_URL}`);
     if (HERO_SMS_API_KEY) {
         console.log("✅ Hero-SMS API: Configured");

@@ -2,14 +2,22 @@ import axios from 'axios';
 
 // Determine API URL based on environment
 const getApiUrl = () => {
-  // In production, use relative URL
-  if (process.env.NODE_ENV === 'production') {
-    return '/api';
+  // Always use REACT_APP_API_URL environment variable
+  const apiUrl = process.env.REACT_APP_API_URL;
+  
+  if (!apiUrl) {
+    console.warn('REACT_APP_API_URL is not set. API requests may fail.');
+    return '/api'; // Fallback to relative URL
   }
   
-  // In development, use full URL to avoid proxy issues
-  // Or use environment variable if set
-  return process.env.REACT_APP_API_URL || 'http://localhost:3000/api';
+  // Ensure the URL ends with /api if it doesn't already
+  if (apiUrl.endsWith('/api')) {
+    return apiUrl;
+  } else if (apiUrl.endsWith('/')) {
+    return `${apiUrl}api`;
+  } else {
+    return `${apiUrl}/api`;
+  }
 };
 
 // Create axios instance with minimal headers
