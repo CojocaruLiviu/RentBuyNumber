@@ -4,6 +4,7 @@
 # Data files
 data.json
 numbers.json
+@wallets/
 
 # Node modules
 node_modules/

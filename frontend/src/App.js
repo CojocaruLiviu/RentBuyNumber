@@ -8,6 +8,7 @@ import Activate from './pages/Activate';
 import MyNumbers from './pages/MyNumbers';
 import Balance from './pages/Balance';
 import Settings from './pages/Settings';
+import apiClient from './api/config';
 import './App.css';
 
 // Telegram Web App SDK (available globally via script tag)
@@ -17,15 +18,35 @@ function App() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    if (window.Telegram?.WebApp) {
-      WebApp.ready();
-      WebApp.expand();
-      
-      // Set theme colors
-      WebApp.setHeaderColor('#2481cc');
-      WebApp.setBackgroundColor('#ffffff');
-    }
-    setReady(true);
+    const initializeApp = async () => {
+      if (window.Telegram?.WebApp) {
+        WebApp.ready();
+        WebApp.expand();
+        
+        // Set theme colors
+        WebApp.setHeaderColor('#2481cc');
+        WebApp.setBackgroundColor('#ffffff');
+
+        // Get user ID from Telegram
+        const userId = WebApp.initDataUnsafe?.user?.id || WebApp.initDataUnsafe?.user_id;
+        
+        if (userId) {
+          try {
+            // Initialize wallet for user
+            await apiClient.post(`/wallet/${userId}/init`);
+            console.log(`Wallet initialized for user: ${userId}`);
+          } catch (error) {
+            console.error('Failed to initialize wallet:', error);
+            // Don't block app if wallet init fails
+          }
+        } else {
+          console.warn('Telegram user ID not available');
+        }
+      }
+      setReady(true);
+    };
+
+    initializeApp();
   }, []);
 
   if (!ready) {

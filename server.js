@@ -3,10 +3,13 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 const path = require("path");
+const fs = require("fs").promises;
+const { existsSync } = require("fs");
+const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const REACT_APP_API_URL = process.env.REACT_APP_API_URL || `smsback.workdomain.site`;
+const REACT_APP_API_URL = process.env.REACT_APP_API_URL || `https://smsback.workdomain.site`;
 const HERO_SMS_API_KEY = process.env.HERO_SMS_API_KEY;
 const HERO_SMS_API_URL = process.env.HERO_SMS_API_URL || "https://hero-sms.com/stubs/handler_api.php";
 
@@ -1065,6 +1068,223 @@ app.get("/api/top-countries-rank/:service", async (req, res) => {
     
     // This returns JSON format
     res.json({ data: result.data });
+});
+
+// Wallet management
+const WALLETS_DIR = path.join(__dirname, "@wallets");
+
+// Ensure wallets directory exists
+async function ensureWalletsDir() {
+    if (!existsSync(WALLETS_DIR)) {
+        await fs.mkdir(WALLETS_DIR, { recursive: true });
+    }
+}
+
+// Initialize wallets directory on server start
+ensureWalletsDir().catch(err => {
+    console.error("Failed to create wallets directory:", err);
+});
+
+// Get wallet file path
+function getWalletPath(userId) {
+    return path.join(WALLETS_DIR, `${userId}.json`);
+}
+
+// Default wallet structure (per coin: address + balance)
+const DEFAULT_WALLET = {
+    btc: { address: "", balance: "0" },
+    eth: { address: "", balance: "0" },
+    usdt: { address: "", balance: "0" }
+};
+
+// Generate a pseudo-address that looks like an EVM address (NOT a real wallet, but stable per user+coin)
+function generateWalletAddress(symbol, userId) {
+    const hash = crypto
+        .createHash("sha256")
+        .update(`${symbol}:${userId}:telegram-wallet`)
+        .digest("hex");
+    // Take first 40 hex chars to form 0x + 40 hex address
+    return `0x${hash.slice(0, 40)}`;
+}
+
+// Normalize wallet to ensure it has address + balance for each coin
+function normalizeWallet(rawWallet, userId) {
+    const wallet = rawWallet || {};
+
+    const normalizeCoin = (key) => {
+        const value = wallet[key];
+        // If already in { address, balance } format
+        if (value && typeof value === "object" && ("balance" in value || "address" in value)) {
+            return {
+                address: value.address || generateWalletAddress(key, userId),
+                balance: value.balance !== undefined ? value.balance.toString() : "0"
+            };
+        }
+        // Legacy format: simple number/string
+        if (value !== undefined && value !== null) {
+            return {
+                address: generateWalletAddress(key, userId),
+                balance: value.toString()
+            };
+        }
+        // No value yet: use default
+        return {
+            address: generateWalletAddress(key, userId),
+            balance: "0"
+        };
+    };
+
+    return {
+        btc: normalizeCoin("btc"),
+        eth: normalizeCoin("eth"),
+        usdt: normalizeCoin("usdt")
+    };
+}
+
+// Get user wallet
+app.get("/api/wallet/:userId", async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        if (!userId || userId === "undefined") {
+            return res.status(400).json({ error: "User ID is required" });
+        }
+
+        await ensureWalletsDir();
+        const walletPath = getWalletPath(userId);
+
+        // Check if wallet exists
+        if (!existsSync(walletPath)) {
+            // Create default wallet
+            let wallet = normalizeWallet({}, userId);
+            await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
+            return res.json({ success: true, wallet });
+        }
+
+        // Read existing wallet and normalize (handles legacy format)
+        const walletData = await fs.readFile(walletPath, "utf8");
+        let wallet = normalizeWallet(JSON.parse(walletData), userId);
+
+        // Persist normalized structure
+        await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
+
+        res.json({ success: true, wallet });
+    } catch (error) {
+        console.error("Error getting wallet:", error);
+        res.status(500).json({ error: "Failed to get wallet", details: error.message });
+    }
+});
+
+// Create or update wallet
+app.post("/api/wallet/:userId", async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { btc, eth, usdt } = req.body;
+
+        if (!userId || userId === "undefined") {
+            return res.status(400).json({ error: "User ID is required" });
+        }
+
+        await ensureWalletsDir();
+        const walletPath = getWalletPath(userId);
+
+        // Load existing or default wallet and normalize
+        let wallet;
+        if (existsSync(walletPath)) {
+            const walletData = await fs.readFile(walletPath, "utf8");
+            wallet = normalizeWallet(JSON.parse(walletData), userId);
+        } else {
+            wallet = normalizeWallet({}, userId);
+        }
+
+        // Update wallet values if provided (expecting balances)
+        if (btc !== undefined) wallet.btc.balance = btc.toString();
+        if (eth !== undefined) wallet.eth.balance = eth.toString();
+        if (usdt !== undefined) wallet.usdt.balance = usdt.toString();
+
+        // Save wallet
+        await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
+
+        res.json({ success: true, wallet });
+    } catch (error) {
+        console.error("Error saving wallet:", error);
+        res.status(500).json({ error: "Failed to save wallet", details: error.message });
+    }
+});
+
+// Update wallet (partial update)
+app.put("/api/wallet/:userId", async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const updates = req.body;
+
+        if (!userId || userId === "undefined") {
+            return res.status(400).json({ error: "User ID is required" });
+        }
+
+        await ensureWalletsDir();
+        const walletPath = getWalletPath(userId);
+
+        // Load existing or default wallet and normalize
+        let wallet;
+        if (existsSync(walletPath)) {
+            const walletData = await fs.readFile(walletPath, "utf8");
+            wallet = normalizeWallet(JSON.parse(walletData), userId);
+        } else {
+            wallet = normalizeWallet({}, userId);
+        }
+
+        // Update only provided fields (balances)
+        if (updates.btc !== undefined) wallet.btc.balance = updates.btc.toString();
+        if (updates.eth !== undefined) wallet.eth.balance = updates.eth.toString();
+        if (updates.usdt !== undefined) wallet.usdt.balance = updates.usdt.toString();
+
+        // Save wallet
+        await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
+
+        res.json({ success: true, wallet });
+    } catch (error) {
+        console.error("Error updating wallet:", error);
+        res.status(500).json({ error: "Failed to update wallet", details: error.message });
+    }
+});
+
+// Initialize wallet (called on app start)
+app.post("/api/wallet/:userId/init", async (req, res) => {
+    try {
+        const { userId } = req.params;
+
+        if (!userId || userId === "undefined") {
+            return res.status(400).json({ error: "User ID is required" });
+        }
+
+        await ensureWalletsDir();
+        const walletPath = getWalletPath(userId);
+
+        console.log("[WALLET_INIT] Request to init wallet for user:", userId);
+        console.log("[WALLET_INIT] Wallet path:", walletPath);
+
+        // If wallet doesn't exist, create it
+        if (!existsSync(walletPath)) {
+            let wallet = normalizeWallet({}, userId);
+            await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
+            console.log("[WALLET_INIT] Wallet file created for user:", userId);
+            return res.json({ success: true, wallet, created: true });
+        }
+
+        // Return existing wallet (normalized)
+        const walletData = await fs.readFile(walletPath, "utf8");
+        let wallet = normalizeWallet(JSON.parse(walletData), userId);
+
+        // Persist normalized structure
+        await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
+        
+        console.log("[WALLET_INIT] Wallet already exists for user:", userId);
+        res.json({ success: true, wallet, created: false });
+    } catch (error) {
+        console.error("[WALLET_INIT] Error initializing wallet for user:", req.params.userId, error);
+        res.status(500).json({ error: "Failed to initialize wallet", details: error.message });
+    }
 });
 
 // Health check

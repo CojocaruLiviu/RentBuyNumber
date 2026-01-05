@@ -14,7 +14,7 @@ const translations = {
   en: {
     // Home
     'home.title': '📱 SMS Number Rental',
-    'home.subtitle': 'Rent and activate phone numbers for SMS verification',
+    'home.subtitle': 'Rent and activate phone numbers for SMS verificatio0n',
     'home.rent': 'Rent Number',
     'home.rentDesc': 'Rent a number for unlimited SMS',
     'home.activate': 'Activate',

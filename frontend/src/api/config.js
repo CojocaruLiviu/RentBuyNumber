@@ -3,12 +3,8 @@ import axios from 'axios';
 // Determine API URL based on environment
 const getApiUrl = () => {
   // Always use REACT_APP_API_URL environment variable
-  const apiUrl = process.env.REACT_APP_API_URL;
-  
-  if (!apiUrl) {
-    console.warn('REACT_APP_API_URL is not set. API requests may fail.');
-    return '/api'; // Fallback to relative URL
-  }
+  // Default to smsback.workdomain.site (backend server)
+  const apiUrl = process.env.REACT_APP_API_URL || 'https://smsback.workdomain.site';
   
   // Ensure the URL ends with /api if it doesn't already
   if (apiUrl.endsWith('/api')) {

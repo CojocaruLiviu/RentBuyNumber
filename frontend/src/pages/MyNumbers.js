@@ -37,18 +37,21 @@ function MyNumbers() {
     if (!expandingId) return;
 
     const loadMessagesForRent = async (rentId) => {
-      if (loadingMessages[rentId]) return;
+      // Use functional updates to avoid stale closures
+      setLoadingMessages((prev) => {
+        if (prev[rentId]) return prev; // Already loading
+        return { ...prev, [rentId]: true };
+      });
       
-      setLoadingMessages({ ...loadingMessages, [rentId]: true });
       try {
         const response = await apiClient.get(`/rented/${rentId}/sms`);
         if (!response.data.error) {
-          setMessages({ ...messages, [rentId]: response.data.data || [] });
+          setMessages((prev) => ({ ...prev, [rentId]: response.data.data || [] }));
         }
       } catch (err) {
         // Silently fail on auto-refresh
       } finally {
-        setLoadingMessages({ ...loadingMessages, [rentId]: false });
+        setLoadingMessages((prev) => ({ ...prev, [rentId]: false }));
       }
     };
 
