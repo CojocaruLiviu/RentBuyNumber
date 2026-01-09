@@ -1,17 +1,154 @@
 require("dotenv").config();
+
+const path = require("path");
+const { existsSync } = require("fs");
+
+let initialDbUrl = process.env.DATABASE_URL || "file:./dateev.db";
+
+// Extract path and resolve to absolute
+const dbPath = initialDbUrl.replace(/^file:/, "").replace(/^\/+/, "");
+const absoluteDbPath = path.isAbsolute(dbPath) 
+    ? path.normalize(dbPath) 
+    : path.resolve(__dirname, dbPath);
+
+// Ensure directory exists
+const dbDir = path.dirname(absoluteDbPath);
+if (!existsSync(dbDir)) {
+    require("fs").mkdirSync(dbDir, { recursive: true });
+}
+
+// Set DATABASE_URL to absolute path BEFORE Prisma imports
+process.env.DATABASE_URL = `file:${path.normalize(absoluteDbPath)}`;
+
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
-const path = require("path");
 const fs = require("fs").promises;
-const { existsSync } = require("fs");
 const crypto = require("crypto");
+const { ethers } = require("ethers");
+const { PrismaClient } = require("@prisma/client");
+const { PrismaBetterSqlite3 } = require("@prisma/adapter-better-sqlite3");
+const Database = require("better-sqlite3");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const REACT_APP_API_URL = process.env.REACT_APP_API_URL || `https://smsback.workdomain.site`;
 const HERO_SMS_API_KEY = process.env.HERO_SMS_API_KEY;
 const HERO_SMS_API_URL = process.env.HERO_SMS_API_URL || "https://hero-sms.com/stubs/handler_api.php";
+
+const DATABASE_URL = process.env.DATABASE_URL;
+
+// Verify it's set before creating adapter
+if (!process.env.DATABASE_URL || typeof process.env.DATABASE_URL !== 'string' || process.env.DATABASE_URL.trim() === '') {
+    throw new Error(`DATABASE_URL must be a non-empty string before creating Prisma adapter. Got: ${typeof process.env.DATABASE_URL}`);
+}
+
+// Log DATABASE_URL for debugging
+console.log("📝 DATABASE_URL set to:", process.env.DATABASE_URL);
+console.log("📝 DATABASE_URL type:", typeof process.env.DATABASE_URL);
+console.log("📝 Absolute DB path:", absoluteDbPath);
+console.log("📝 Adapter will use URL:", `file:${absoluteDbPath}`);
+
+if (!process.env.DATABASE_URL) {
+    console.error("❌ DATABASE_URL is undefined right before adapter creation!");
+    process.env.DATABASE_URL = DATABASE_URL; // Re-set it
+}
+
+// Ensure DATABASE_URL is definitely a valid string
+const currentDbUrl = process.env.DATABASE_URL;
+if (!currentDbUrl || typeof currentDbUrl !== 'string') {
+    console.error("❌ DATABASE_URL validation failed:", currentDbUrl, typeof currentDbUrl);
+    process.env.DATABASE_URL = DATABASE_URL;
+    console.log("🔄 Reset DATABASE_URL to:", process.env.DATABASE_URL);
+}
+
+let adapter;
+try {
+    const adapterConfig = {
+        url: `file:${absoluteDbPath}`
+    };
+    const adapterOptions = {};
+    
+    // Create adapter factory with config containing URL
+    adapter = new PrismaBetterSqlite3(adapterConfig, adapterOptions);
+    
+    const originalConnect = adapter.connect.bind(adapter);
+    adapter.connect = function() {
+        process.env.DATABASE_URL = `file:${absoluteDbPath}`;
+        return originalConnect();
+    };
+    
+    console.log("✅ Adapter created with config URL:", adapterConfig.url);
+} catch (error) {
+    console.error("❌ Error creating Prisma adapter:", error);
+    console.error("DATABASE_URL at time of error:", process.env.DATABASE_URL);
+    throw error;
+}
+
+process.env.DATABASE_URL = `file:${absoluteDbPath}`;
+const prisma = new PrismaClient({ adapter });
+
+process.env.DATABASE_URL = `file:${absoluteDbPath}`;
+
+try {
+    if (adapter && typeof adapter === 'object') {
+        console.log("✅ Adapter created, DATABASE_URL available:", process.env.DATABASE_URL);
+    }
+} catch (e) {
+    console.warn("⚠️ Could not verify adapter config:", e.message);
+}
+
+// Helper function to get or create user with balance 0 USDT
+async function getOrCreateUser(userId) {
+    try {
+        const userIdStr = userId.toString();
+        console.log(`[getOrCreateUser] Checking for user: ${userIdStr}`);
+        
+        // Check if user exists
+        let user = await prisma.users.findUnique({
+            where: { idTelegram: userIdStr }
+        });
+
+        if (user) {
+            console.log(`[getOrCreateUser] User ${userIdStr} already exists with ID: ${user.id}`);
+            return user;
+        }
+
+        // If user doesn't exist, create new user with balance 0
+        console.log(`[getOrCreateUser] Creating new user: ${userIdStr}`);
+            user = await prisma.users.create({
+                data: {
+                idTelegram: userIdStr,
+                    SummDolar: 0
+                }
+            });
+        
+        console.log(`✅ New user created: ${userId} with balance 0 USDT (DB ID: ${user.id})`);
+        
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        const verifyUser = await prisma.users.findUnique({
+            where: { idTelegram: userIdStr }
+        });
+        
+        if (verifyUser) {
+            console.log(`[getOrCreateUser] ✅ Verified: User ${userIdStr} saved successfully (ID: ${verifyUser.id}, Balance: ${verifyUser.SummDolar})`);
+        } else {
+            console.error(`[getOrCreateUser] ❌ WARNING: User ${userIdStr} was not found after creation!`);
+            console.error(`[getOrCreateUser] ❌ This indicates the write operation may have failed silently.`);
+        }
+
+        return user;
+    } catch (error) {
+        console.error(`❌ Error getting/creating user ${userId}:`, error);
+        console.error(`❌ Error details:`, {
+            message: error.message,
+            code: error.code,
+            meta: error.meta
+        });
+        throw error;
+    }
+}
 
 // Increase header size limits to prevent 431 error
 app.use(express.json({ limit: '10mb' }));
@@ -33,8 +170,6 @@ if (!HERO_SMS_API_KEY) {
     console.warn("⚠️ WARNING: HERO_SMS_API_KEY not set. API endpoints will return errors.");
 }
 
-// Helper function for Hero-SMS API requests
-// Format: GET ?action=ACTION&api_key=KEY&param1=value1&param2=value2
 async function heroSmsRequest(action, params = {}) {
     if (!HERO_SMS_API_KEY) {
         return { error: "API key not configured" };
@@ -1090,12 +1225,23 @@ function getWalletPath(userId) {
     return path.join(WALLETS_DIR, `${userId}.json`);
 }
 
-// Default wallet structure (per coin: address + balance)
+// Default wallet structure (per coin: address + balance + privateKey)
 const DEFAULT_WALLET = {
-    btc: { address: "", balance: "0" },
-    eth: { address: "", balance: "0" },
-    usdt: { address: "", balance: "0" }
+    btc: { address: "", balance: "0", privateKey: "" },
+    eth: { address: "", balance: "0", privateKey: "" },
+    usdt: { address: "", balance: "0", privateKey: "" }
 };
+
+// Generate a deterministic private key (64 hex chars = 32 bytes) based on userId and symbol
+function generatePrivateKey(symbol, userId) {
+    // Use a different seed for private key to ensure it's different from address
+    const hash = crypto
+        .createHash("sha256")
+        .update(`${symbol}:${userId}:telegram-wallet-private-key`)
+        .digest("hex");
+    // Return 64 hex characters (32 bytes) for private key
+    return hash;
+}
 
 // Generate a pseudo-address that looks like an EVM address (NOT a real wallet, but stable per user+coin)
 function generateWalletAddress(symbol, userId) {
@@ -1107,30 +1253,33 @@ function generateWalletAddress(symbol, userId) {
     return `0x${hash.slice(0, 40)}`;
 }
 
-// Normalize wallet to ensure it has address + balance for each coin
+// Normalize wallet to ensure it has address + balance + privateKey for each coin
 function normalizeWallet(rawWallet, userId) {
     const wallet = rawWallet || {};
 
     const normalizeCoin = (key) => {
         const value = wallet[key];
-        // If already in { address, balance } format
-        if (value && typeof value === "object" && ("balance" in value || "address" in value)) {
+        // If already in { address, balance, privateKey } format
+        if (value && typeof value === "object" && ("balance" in value || "address" in value || "privateKey" in value)) {
             return {
                 address: value.address || generateWalletAddress(key, userId),
-                balance: value.balance !== undefined ? value.balance.toString() : "0"
+                balance: value.balance !== undefined ? value.balance.toString() : "0",
+                privateKey: value.privateKey || generatePrivateKey(key, userId)
             };
         }
         // Legacy format: simple number/string
         if (value !== undefined && value !== null) {
             return {
                 address: generateWalletAddress(key, userId),
-                balance: value.toString()
+                balance: value.toString(),
+                privateKey: generatePrivateKey(key, userId)
             };
         }
         // No value yet: use default
         return {
             address: generateWalletAddress(key, userId),
-            balance: "0"
+            balance: "0",
+            privateKey: generatePrivateKey(key, userId)
         };
     };
 
@@ -1139,6 +1288,61 @@ function normalizeWallet(rawWallet, userId) {
         eth: normalizeCoin("eth"),
         usdt: normalizeCoin("usdt")
     };
+}
+
+// BSC Configuration pentru verificare balance real
+const BSC_RPC = process.env.BSC_RPC_URL || "https://bsc-dataseed1.binance.org/";
+const USDT_CONTRACT_BSC = "0x55d398326f99059fF775485246999027B3197955"; // USDT pe BSC
+const ERC20_ABI = [
+    "function balanceOf(address owner) view returns (uint256)",
+    "function decimals() view returns (uint8)",
+    "function symbol() view returns (string)"
+];
+
+// Provider pentru BSC (lazy initialization)
+let bscProvider = null;
+function getBSCProvider() {
+    if (!bscProvider) {
+        bscProvider = new ethers.JsonRpcProvider(BSC_RPC);
+    }
+    return bscProvider;
+}
+
+/**
+ * Verifică balance-ul real USDT de pe blockchain (BSC)
+ */
+async function getRealUSDTBalance(address) {
+    try {
+        if (!address || !ethers.isAddress(address)) {
+            console.warn(`[getRealUSDTBalance] Adresă invalidă: ${address}`);
+            return null;
+        }
+
+        const provider = getBSCProvider();
+        const normalizedAddress = ethers.getAddress(address);
+        const usdtContract = new ethers.Contract(USDT_CONTRACT_BSC, ERC20_ABI, provider);
+
+        const [balance, decimals] = await Promise.all([
+            usdtContract.balanceOf(normalizedAddress),
+            usdtContract.decimals()
+        ]);
+
+        const formattedBalance = ethers.formatUnits(balance, decimals);
+        const balanceNumber = parseFloat(formattedBalance);
+
+        console.log(`[getRealUSDTBalance] ✅ Balance real pentru ${normalizedAddress}: ${formattedBalance} USDT`);
+
+        return {
+            balance: formattedBalance,
+            balanceNumber: balanceNumber,
+            balanceRaw: balance.toString(),
+            decimals: Number(decimals)
+        };
+    } catch (error) {
+        console.error(`[getRealUSDTBalance] ❌ Eroare la verificarea balance-ului real pentru ${address}:`, error.message);
+        // Nu aruncăm eroarea, returnăm null pentru a nu bloca request-ul
+        return null;
+    }
 }
 
 // Get user wallet
@@ -1150,25 +1354,70 @@ app.get("/api/wallet/:userId", async (req, res) => {
             return res.status(400).json({ error: "User ID is required" });
         }
 
+        // Ensure user exists in database with balance 0 USDT
+        const user = await getOrCreateUser(userId);
+
         await ensureWalletsDir();
         const walletPath = getWalletPath(userId);
 
         // Check if wallet exists
+        let wallet;
         if (!existsSync(walletPath)) {
             // Create default wallet
-            let wallet = normalizeWallet({}, userId);
+            wallet = normalizeWallet({}, userId);
             await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
-            return res.json({ success: true, wallet });
-        }
-
+        } else {
         // Read existing wallet and normalize (handles legacy format)
         const walletData = await fs.readFile(walletPath, "utf8");
-        let wallet = normalizeWallet(JSON.parse(walletData), userId);
+            wallet = normalizeWallet(JSON.parse(walletData), userId);
 
         // Persist normalized structure
         await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
+        }
 
-        res.json({ success: true, wallet });
+        // Verifică balance-ul real USDT de pe blockchain și sincronizează
+        let realUSDTBalance = 0;
+        if (wallet.usdt && wallet.usdt.address && ethers.isAddress(wallet.usdt.address)) {
+            try {
+                console.log(`[WALLET] Verificare balance real USDT pentru user ${userId}, adresă: ${wallet.usdt.address}`);
+                const realBalance = await getRealUSDTBalance(wallet.usdt.address);
+                
+                if (realBalance) {
+                    realUSDTBalance = realBalance.balanceNumber;
+                    
+                    if (realBalance.balanceNumber !== parseFloat(wallet.usdt.balance || "0")) {
+                        console.log(`[WALLET] 🔄 Sincronizare balance: ${wallet.usdt.balance} -> ${realBalance.balance} USDT`);
+                        // Actualizează balance-ul cu valoarea reală de pe blockchain
+                        wallet.usdt.balance = realBalance.balance;
+                        // Salvează în fișier
+                        await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
+                        console.log(`[WALLET] ✅ Balance sincronizat cu blockchain`);
+                    } else {
+                        console.log(`[WALLET] ✅ Balance deja sincronizat: ${realBalance.balance} USDT`);
+                    }
+                }
+            } catch (error) {
+                console.error(`[WALLET] ⚠️ Eroare la sincronizarea balance-ului real:`, error.message);
+                // Continuă cu balance-ul din fișier dacă verificarea eșuează
+                // Folosim balance-ul din fișier ca fallback
+                realUSDTBalance = parseFloat(wallet.usdt.balance || "0");
+            }
+        } else {
+            // Dacă nu avem adresă validă, folosim balance-ul din fișier
+            realUSDTBalance = parseFloat(wallet.usdt?.balance || "0");
+        }
+
+        // Calculăm total balance = SummDolar (suma de bază) + balance USDT real de pe blockchain
+        const baseBalance = user.SummDolar || 0;
+        const totalBalance = baseBalance + realUSDTBalance;
+        
+        console.log(`[WALLET] 💰 Total balance calculat: ${baseBalance} (SummDolar) + ${realUSDTBalance} (USDT real) = ${totalBalance} USD`);
+
+        res.json({ 
+            success: true, 
+            wallet,
+            totalBalance: totalBalance // Total balance in USD from database
+        });
     } catch (error) {
         console.error("Error getting wallet:", error);
         res.status(500).json({ error: "Failed to get wallet", details: error.message });
@@ -1184,6 +1433,9 @@ app.post("/api/wallet/:userId", async (req, res) => {
         if (!userId || userId === "undefined") {
             return res.status(400).json({ error: "User ID is required" });
         }
+
+        // Ensure user exists in database with balance 0 USDT
+        await getOrCreateUser(userId);
 
         await ensureWalletsDir();
         const walletPath = getWalletPath(userId);
@@ -1222,6 +1474,9 @@ app.put("/api/wallet/:userId", async (req, res) => {
             return res.status(400).json({ error: "User ID is required" });
         }
 
+        // Ensure user exists in database with balance 0 USDT
+        await getOrCreateUser(userId);
+
         await ensureWalletsDir();
         const walletPath = getWalletPath(userId);
 
@@ -1258,6 +1513,9 @@ app.post("/api/wallet/:userId/init", async (req, res) => {
             return res.status(400).json({ error: "User ID is required" });
         }
 
+        // Ensure user exists in database with balance 0 USDT
+        await getOrCreateUser(userId);
+
         await ensureWalletsDir();
         const walletPath = getWalletPath(userId);
 
@@ -1287,6 +1545,36 @@ app.post("/api/wallet/:userId/init", async (req, res) => {
     }
 });
 
+// Initialize user (called when mini app opens)
+// This ensures the user exists in the database
+app.post("/api/user/init/:userId", async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        if (!userId || userId === "undefined") {
+            return res.status(400).json({ error: "User ID is required" });
+        }
+
+        // Ensure user exists in database with balance 0 USDT
+        const user = await getOrCreateUser(userId);
+        
+        console.log(`✅ User initialized: ${userId} (exists: ${!!user})`);
+        
+        res.json({ 
+            success: true, 
+            user: {
+                id: user.id,
+                idTelegram: user.idTelegram,
+                balance: user.SummDolar
+            },
+            created: user.createdAt.getTime() === user.updatedAt.getTime() // New user if created = updated
+        });
+    } catch (error) {
+        console.error("❌ Error initializing user:", error);
+        res.status(500).json({ error: "Failed to initialize user", details: error.message });
+    }
+});
+
 // Health check
 app.get("/api/health", (req, res) => {
     res.json({ 
@@ -1302,14 +1590,123 @@ app.get("*", (req, res) => {
     res.sendFile(path.join(__dirname, "frontend", "build", "index.html"));
 });
 
-app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📱 Mini App URL: http://localhost:${PORT}`);
-    console.log(`📱 Mini App Env: ${REACT_APP_API_URL}`);
-    console.log(`🔗 API URL: ${HERO_SMS_API_URL}`);
-    if (HERO_SMS_API_KEY) {
-        console.log("✅ Hero-SMS API: Configured");
-    } else {
-        console.log("⚠️ Hero-SMS API: Not configured (add HERO_SMS_API_KEY to .env)");
+// Initialize Prisma connection and start server
+async function startServer() {
+    try {
+        // Ensure DATABASE_URL is set before connecting (adapter reads it during connect)
+        // Use the absolute path that was set earlier, don't overwrite it
+        if (!process.env.DATABASE_URL) {
+            // Fallback: reconstruct absolute path if somehow lost
+            const fallbackPath = path.join(__dirname, "prisma", "dev.db");
+            const fallbackDbPath = path.isAbsolute(fallbackPath) ? fallbackPath : path.resolve(__dirname, fallbackPath);
+            process.env.DATABASE_URL = `file:${fallbackDbPath}`;
+        }
+        
+        // Ensure DATABASE_URL is a string and in correct format
+        const dbUrl = String(process.env.DATABASE_URL);
+        if (!dbUrl.startsWith('file:')) {
+            // If it's not in file: format, convert it
+            const dbPath = path.isAbsolute(dbUrl) ? dbUrl : path.resolve(__dirname, dbUrl);
+            process.env.DATABASE_URL = `file:${dbPath}`;
+        } else {
+            // Ensure it's set correctly
+        process.env.DATABASE_URL = dbUrl;
+        }
+        
+        console.log("🔍 Connecting with DATABASE_URL:", process.env.DATABASE_URL);
+        console.log("🔍 DATABASE_URL type:", typeof process.env.DATABASE_URL);
+        console.log("🔍 DATABASE_URL value check:", process.env.DATABASE_URL ? "SET" : "NOT SET");
+        
+        // Verify DATABASE_URL is valid before connecting
+        if (!process.env.DATABASE_URL || typeof process.env.DATABASE_URL !== 'string') {
+            throw new Error("DATABASE_URL must be a non-empty string before connecting");
+        }
+        
+        // Final check: ensure DATABASE_URL is definitely set and valid
+        // The adapter reads this during $connect(), so it must be set correctly
+        // Use the absoluteDbPath we calculated at the top level to ensure consistency
+        const finalDbUrl = process.env.DATABASE_URL;
+        if (!finalDbUrl || typeof finalDbUrl !== 'string' || finalDbUrl.trim() === '') {
+            console.error("❌ DATABASE_URL is invalid before connection:", finalDbUrl, typeof finalDbUrl);
+            // Use the absolute path we calculated earlier (from top-level scope)
+            process.env.DATABASE_URL = `file:${absoluteDbPath}`;
+            console.log("🔄 Recovered DATABASE_URL using absoluteDbPath:", process.env.DATABASE_URL);
+        } else {
+            // Ensure it matches the absolute path we're using
+            // Re-set it to be absolutely sure it's correct
+            process.env.DATABASE_URL = `file:${absoluteDbPath}`;
+            console.log("✅ Ensuring DATABASE_URL matches absoluteDbPath:", process.env.DATABASE_URL);
+        }
+        
+        // One more time - set it right before connect to be absolutely sure
+        // Use Object.defineProperty to ensure it's definitely set and accessible
+        const dbUrlValue = `file:${absoluteDbPath}`;
+        Object.defineProperty(process.env, 'DATABASE_URL', {
+            value: dbUrlValue,
+            writable: true,
+            enumerable: true,
+            configurable: true
+        });
+        // Also set it normally as a fallback
+        process.env.DATABASE_URL = dbUrlValue;
+        console.log("🔒 Final DATABASE_URL before connect:", process.env.DATABASE_URL);
+        console.log("🔒 DATABASE_URL from process.env:", process.env.DATABASE_URL);
+        console.log("🔒 DATABASE_URL type check:", typeof process.env.DATABASE_URL);
+        
+        // Verify it's accessible
+        if (!process.env.DATABASE_URL) {
+            throw new Error("DATABASE_URL is still undefined after all attempts to set it!");
+        }
+        
+        // Connect to Prisma database
+        // The adapter will read process.env.DATABASE_URL during this call
+        // Wrap in a try-catch to see what the adapter is actually seeing
+        try {
+            // Double-check one more time right before the call
+            if (!process.env.DATABASE_URL) {
+                process.env.DATABASE_URL = `file:${absoluteDbPath}`;
+            }
+        await prisma.$connect();
+        } catch (connectError) {
+            console.error("❌ Connection error details:");
+            console.error("DATABASE_URL at error time:", process.env.DATABASE_URL);
+            console.error("absoluteDbPath:", absoluteDbPath);
+            console.error("Error:", connectError);
+            throw connectError;
+        }
+        console.log("✅ Prisma: Connected to database");
+
+        // Start Express server
+        app.listen(PORT, () => {
+            console.log(`🚀 Server running on port ${PORT}`);
+            console.log(`📱 Mini App URL: http://localhost:${PORT}`);
+            console.log(`📱 Mini App Env: ${REACT_APP_API_URL}`);
+            console.log(`🔗 API URL: ${HERO_SMS_API_URL}`);
+            if (HERO_SMS_API_KEY) {
+                console.log("✅ Hero-SMS API: Configured");
+            } else {
+                console.log("⚠️ Hero-SMS API: Not configured (add HERO_SMS_API_KEY to .env)");
+            }
+            console.log("💡 New users will be automatically added to the database with balance 0 USDT");
+        });
+    } catch (error) {
+        console.error("❌ Error starting server:", error);
+        process.exit(1);
     }
+}
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+    console.log('\n🛑 Shutting down gracefully...');
+    await prisma.$disconnect();
+    process.exit(0);
 });
+
+process.on('SIGTERM', async () => {
+    console.log('\n🛑 Shutting down gracefully...');
+    await prisma.$disconnect();
+    process.exit(0);
+});
+
+// Start the server
+startServer();

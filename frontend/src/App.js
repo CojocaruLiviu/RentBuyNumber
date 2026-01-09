@@ -32,15 +32,19 @@ function App() {
         
         if (userId) {
           try {
-            // Initialize wallet for user
+            // First, ensure user exists in database (create if doesn't exist)
+            await apiClient.post(`/user/init/${userId}`);
+            console.log(`✅ User initialized in database: ${userId}`);
+            
+            // Then initialize wallet for user
             await apiClient.post(`/wallet/${userId}/init`);
-            console.log(`Wallet initialized for user: ${userId}`);
+            console.log(`✅ Wallet initialized for user: ${userId}`);
           } catch (error) {
-            console.error('Failed to initialize wallet:', error);
-            // Don't block app if wallet init fails
+            console.error('❌ Failed to initialize user/wallet:', error);
+            // Don't block app if initialization fails
           }
         } else {
-          console.warn('Telegram user ID not available');
+          console.warn('⚠️ Telegram user ID not available');
         }
       }
       setReady(true);

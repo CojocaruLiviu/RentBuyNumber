@@ -10,6 +10,7 @@ const WebApp = window.Telegram?.WebApp || {};
 function Balance() {
   const navigate = useNavigate();
   const [wallet, setWallet] = useState(null);
+  const [totalBalance, setTotalBalance] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -46,8 +47,10 @@ function Balance() {
       if (response.data.error) {
         setError(response.data.error);
         setWallet(null);
+        setTotalBalance(0);
       } else {
         setWallet(response.data.wallet);
+        setTotalBalance(response.data.totalBalance || 0);
       }
     } catch (err) {
       const errorMsg = err.response?.data?.error || 'Failed to load wallet';
@@ -102,6 +105,25 @@ function Balance() {
       <h2>💰 My Wallet</h2>
 
       {error && <div className="error">{error}</div>}
+
+      {/* Total Balance Card */}
+      <div className="card" style={{ 
+        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+        color: 'white',
+        marginBottom: '16px'
+      }}>
+        <div style={{ padding: '20px', textAlign: 'center' }}>
+          <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '8px' }}>
+            Total Available Balance
+          </div>
+          <div style={{ fontSize: '36px', fontWeight: 'bold', marginBottom: '4px' }}>
+            ${totalBalance.toFixed(2)}
+          </div>
+          <div style={{ fontSize: '12px', opacity: 0.8 }}>
+            USD
+          </div>
+        </div>
+      </div>
 
       {wallet && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>

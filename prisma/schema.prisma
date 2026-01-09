@@ -1,0 +1,35 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Users {
+  id          Int      @id @default(autoincrement())
+  idTelegram  String   @unique
+  SummDolar Float @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  numbers     NumbersList[]
+  moneyHistory MoneyHistory[]
+}
+
+model NumbersList {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      Users   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  number    String
+  statusNum String
+  dateTime  DateTime @default(now())
+}
+
+model MoneyHistory {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      Users    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amount    Float
+  action    String
+  dateTime  DateTime @default(now())
+}

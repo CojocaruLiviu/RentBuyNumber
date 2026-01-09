@@ -1,0 +1,9 @@
+-- CreateTable
+CREATE TABLE "MoneyHistory" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "userId" INTEGER NOT NULL,
+    "amount" REAL NOT NULL,
+    "action" TEXT NOT NULL,
+    "dateTime" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "MoneyHistory_userId_fkey" FOREIGN KEY ("userId") REFERENCES "Users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
