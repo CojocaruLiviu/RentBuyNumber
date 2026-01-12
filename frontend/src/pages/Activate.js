@@ -21,6 +21,10 @@ function Activate() {
   const [error, setError] = useState('');
   const [activation, setActivation] = useState(null);
   const [smsCode, setSmsCode] = useState('');
+  const [activationCost, setActivationCost] = useState(null);
+  const [statusInfo, setStatusInfo] = useState(null);
+  const [loadingStatus, setLoadingStatus] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   
   // Search states
   const [serviceSearch, setServiceSearch] = useState('');
@@ -225,11 +229,40 @@ function Activate() {
       return;
     }
 
+    // Get user ID from Telegram
+    const userId = WebApp.initDataUnsafe?.user?.id || WebApp.initDataUnsafe?.user_id;
+    if (!userId) {
+      setError('Telegram user ID not available. Please open this app from Telegram.');
+      return;
+    }
+
     setLoading(true);
     setError('');
 
     try {
+      // First, check user balance
+      const balanceResponse = await apiClient.get(`/wallet/${userId}`);
+      const userBalance = balanceResponse.data?.totalBalance || 0;
+      const cost = priceInfo.cost;
+
+      // Check if user has enough balance
+      if (userBalance < cost) {
+        setLoading(false);
+        const errorMsg = `Not enough money. You have $${userBalance.toFixed(4)} USD, but need $${cost.toFixed(4)} USD.`;
+        setError(errorMsg);
+        
+        // Show alert using Telegram WebApp if available
+        if (WebApp.showAlert) {
+          WebApp.showAlert(errorMsg);
+        } else {
+          alert(errorMsg);
+        }
+        return;
+      }
+
+      // If balance is sufficient, proceed with activation
       const response = await apiClient.post('/activate', {
+        userId: userId,
         countryId: selectedCountry,
         service: selectedService,
         maxPrice: priceInfo.cost
@@ -244,11 +277,18 @@ function Activate() {
           country: response.data.country,
           service: response.data.service
         });
+        // Save the cost for potential refund
+        setActivationCost(response.data.cost || priceInfo.cost);
       } else {
         setError('Unexpected response format');
       }
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to activate number');
+      // Handle balance check error
+      if (err.response?.status === 404 || err.response?.status === 500) {
+        setError('Failed to check balance. Please try again.');
+      } else {
+        setError(err.response?.data?.error || 'Failed to activate number');
+      }
     } finally {
       setLoading(false);
     }
@@ -269,6 +309,80 @@ function Activate() {
 
     // Stop after 5 minutes
     setTimeout(() => clearInterval(interval), 300000);
+  };
+
+  const handleRefreshStatus = async () => {
+    if (!activation?.id) return;
+
+    setLoadingStatus(true);
+    setError('');
+    setStatusInfo(null);
+
+    try {
+      const response = await apiClient.get(`/status/${activation.id}`);
+      if (response.data.error) {
+        setError(response.data.error);
+      } else {
+        setStatusInfo(response.data);
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to get status');
+    } finally {
+      setLoadingStatus(false);
+    }
+  };
+
+  const handleCancelActivation = async () => {
+    if (!activation?.id) return;
+
+    const userId = WebApp.initDataUnsafe?.user?.id || WebApp.initDataUnsafe?.user_id;
+    if (!userId) {
+      setError('Telegram user ID not available.');
+      return;
+    }
+
+    if (!activationCost) {
+      setError('Cost information not available for refund.');
+      return;
+    }
+
+    if (!window.confirm(`Are you sure you want to cancel this activation? You will receive a refund of $${activationCost.toFixed(4)} USD.`)) {
+      return;
+    }
+
+    setCancelling(true);
+    setError('');
+
+    try {
+      const response = await apiClient.post(`/cancel/${activation.id}`, {
+        userId: userId,
+        cost: activationCost
+      });
+
+      if (response.data.error) {
+        setError(response.data.error);
+      } else if (response.data.success) {
+        const message = response.data.message || 'Activation cancelled successfully';
+        if (response.data.refundAmount) {
+          alert(`${message}\nRefund: $${response.data.refundAmount.toFixed(4)} USD\nNew Balance: $${response.data.newBalance.toFixed(4)} USD`);
+        } else {
+          alert(message);
+        }
+        
+        // Reset activation
+        setActivation(null);
+        setSmsCode('');
+        setActivationCost(null);
+        setStatusInfo(null);
+        setSelectedService('');
+      } else {
+        setError(response.data.message || 'Failed to cancel activation');
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to cancel activation');
+    } finally {
+      setCancelling(false);
+    }
   };
 
   return (
@@ -514,14 +628,54 @@ function Activate() {
             </div>
           )}
 
+          {/* Status Information */}
+          {statusInfo && (
+            <div className="card" style={{ marginTop: '16px', padding: '12px', backgroundColor: '#f5f5f5' }}>
+              <h4>📊 Status Information</h4>
+              <pre style={{ 
+                whiteSpace: 'pre-wrap', 
+                wordBreak: 'break-word',
+                fontSize: '12px',
+                backgroundColor: '#fff',
+                padding: '8px',
+                borderRadius: '4px',
+                marginTop: '8px'
+              }}>
+                {JSON.stringify(statusInfo, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {/* Action Buttons */}
+          <div style={{ display: 'flex', gap: '8px', marginTop: '16px', flexWrap: 'wrap' }}>
+            <button 
+              className="btn" 
+              onClick={handleRefreshStatus}
+              disabled={loadingStatus}
+              style={{ flex: 1, minWidth: '120px' }}
+            >
+              {loadingStatus ? 'Loading...' : '🔄 Refresh Status'}
+            </button>
+            <button 
+              className="btn btn-secondary" 
+              onClick={handleCancelActivation}
+              disabled={cancelling}
+              style={{ flex: 1, minWidth: '120px' }}
+            >
+              {cancelling ? 'Cancelling...' : '❌ Cancel & Refund'}
+            </button>
+          </div>
+
           <button 
             className="btn btn-secondary" 
             onClick={() => {
               setActivation(null);
               setSmsCode('');
+              setActivationCost(null);
+              setStatusInfo(null);
               setSelectedService('');
             }}
-            style={{ marginBottom: '12px' }}
+            style={{ marginTop: '12px', marginBottom: '12px' }}
           >
             Get Another Number
           </button>

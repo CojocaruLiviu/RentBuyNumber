@@ -17,12 +17,14 @@ model Users {
 }
 
 model NumbersList {
-  id        Int      @id @default(autoincrement())
-  userId    Int
-  user      Users   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  number    String
-  statusNum String
-  dateTime  DateTime @default(now())
+  id           Int       @id @default(autoincrement())
+  userId       Int
+  user         Users     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  number       String
+  statusNum    String
+  activationId String?
+  cost         Float?
+  dateTime     DateTime  @default(now())
 }
 
 model MoneyHistory {

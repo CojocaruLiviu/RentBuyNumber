@@ -863,11 +863,36 @@ app.get("/api/price", async (req, res) => {
 
 // Get number for activation
 app.post("/api/activate", async (req, res) => {
-    const { countryId, service, useV2, maxPrice } = req.body;
+    const { userId, countryId, service, useV2, maxPrice } = req.body;
     
     if (!countryId || !service) {
         return res.status(400).json({ error: "countryId and service are required" });
     }
+
+    if (!userId || userId === "undefined") {
+        return res.status(400).json({ error: "User ID is required" });
+    }
+
+    // Ensure user exists in database
+    const user = await getOrCreateUser(userId);
+    
+    // Get cost from maxPrice (priceInfo.cost from frontend)
+    const cost = parseFloat(maxPrice || 0);
+    
+    if (cost <= 0) {
+        return res.status(400).json({ error: "Invalid cost. Please select a valid country and service." });
+    }
+
+    // Check if user has enough balance (SummDolar)
+    const currentBalance = user.SummDolar || 0;
+    
+    if (currentBalance < cost) {
+        return res.status(400).json({ 
+            error: `Insufficient balance. You have $${currentBalance.toFixed(4)} USD, but need $${cost.toFixed(4)} USD.` 
+        });
+    }
+
+    console.log(`[ACTIVATE] User ${userId} requesting number: balance=${currentBalance.toFixed(4)} USD, cost=${cost.toFixed(4)} USD`);
 
     // Use V2 if requested, otherwise use V1
     const action = useV2 ? "getNumberV2" : "getNumber";
@@ -894,13 +919,54 @@ app.post("/api/activate", async (req, res) => {
     if (!numberData) {
         return res.status(400).json({ error: result.data || "Failed to get number" });
     }
+
+    // Subtract cost from user balance
+    const newBalance = currentBalance - cost;
+    
+    try {
+        // Update user balance in database
+        await prisma.users.update({
+            where: { id: user.id },
+            data: { SummDolar: newBalance }
+        });
+
+        // Add transaction to MoneyHistory
+        await prisma.moneyHistory.create({
+            data: {
+                userId: user.id,
+                amount: -cost, // Negative because it's a deduction
+                action: `Activate number: ${numberData.number} (${service})`
+            }
+        });
+
+        // Save number to NumbersList with statusNum = "bought"
+        await prisma.numbersList.create({
+            data: {
+                userId: user.id,
+                number: numberData.number,
+                statusNum: "bought",
+                activationId: numberData.id.toString(),
+                cost: cost
+            }
+        });
+
+        console.log(`[ACTIVATE] ✅ Balance updated: ${currentBalance.toFixed(4)} -> ${newBalance.toFixed(4)} USD`);
+        console.log(`[ACTIVATE] ✅ Transaction recorded: -${cost.toFixed(4)} USD`);
+        console.log(`[ACTIVATE] ✅ Number saved to NumbersList: ${numberData.number} (status: bought)`);
+    } catch (dbError) {
+        console.error(`[ACTIVATE] ❌ Error updating balance or saving number:`, dbError);
+        // Note: Number was already obtained, but balance update failed
+        // In production, you might want to handle this differently (rollback, etc.)
+    }
     
     res.json({ 
         success: true,
         id: numberData.id,
         number: numberData.number,
         country: countryId,
-        service: service
+        service: service,
+        cost: cost,
+        newBalance: newBalance
     });
 });
 
@@ -962,6 +1028,8 @@ app.get("/api/sms/:activationId", async (req, res) => {
 // Cancel activation
 app.post("/api/cancel/:activationId", async (req, res) => {
     const { activationId } = req.params;
+    const { userId, cost } = req.body;
+    
     // Format: ?action=setStatus&api_key=KEY&id=12345&status=8
     // Status 8 = cancel activation
     const result = await heroSmsRequest("setStatus", { 
@@ -975,9 +1043,137 @@ app.post("/api/cancel/:activationId", async (req, res) => {
     
     // Response: "ACCESS_CANCEL" on success
     if (result.data === "ACCESS_CANCEL") {
-        res.json({ success: true, message: "Activation cancelled" });
+        // Return money to user if userId and cost are provided
+        if (userId && cost) {
+            try {
+                const user = await getOrCreateUser(userId);
+                const currentBalance = user.SummDolar || 0;
+                const refundAmount = parseFloat(cost);
+                const newBalance = currentBalance + refundAmount;
+                
+                // Update user balance
+                await prisma.users.update({
+                    where: { id: user.id },
+                    data: { SummDolar: newBalance }
+                });
+                
+                // Add transaction to MoneyHistory
+                await prisma.moneyHistory.create({
+                    data: {
+                        userId: user.id,
+                        amount: refundAmount, // Positive because it's a refund
+                        action: `Cancel activation: ${activationId} (refund)`
+                    }
+                });
+                
+                // Update NumbersList status to "cancelled"
+                try {
+                    await prisma.numbersList.updateMany({
+                        where: { 
+                            userId: user.id,
+                            activationId: activationId.toString()
+                        },
+                        data: { statusNum: "cancelled" }
+                    });
+                    console.log(`[CANCEL] ✅ NumbersList updated: activationId ${activationId} set to cancelled`);
+                } catch (updateError) {
+                    console.error(`[CANCEL] ⚠️ Error updating NumbersList:`, updateError);
+                    // Continue even if update fails
+                }
+                
+                console.log(`[CANCEL] ✅ Refund processed: +${refundAmount.toFixed(4)} USD`);
+                console.log(`[CANCEL] ✅ Balance updated: ${currentBalance.toFixed(4)} -> ${newBalance.toFixed(4)} USD`);
+                
+                res.json({ 
+                    success: true, 
+                    message: "Activation cancelled and money refunded",
+                    refundAmount: refundAmount,
+                    newBalance: newBalance
+                });
+            } catch (dbError) {
+                console.error(`[CANCEL] ❌ Error refunding money:`, dbError);
+                // Still return success for cancellation, but log the refund error
+                res.json({ 
+                    success: true, 
+                    message: "Activation cancelled (refund may have failed)",
+                    warning: "Failed to process refund"
+                });
+            }
+        } else {
+            res.json({ success: true, message: "Activation cancelled" });
+        }
     } else {
         res.json({ success: false, message: result.data });
+    }
+});
+
+// Get user's numbers from NumbersList
+app.get("/api/my-numbers/:userId", async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        if (!userId || userId === "undefined") {
+            return res.status(400).json({ error: "User ID is required" });
+        }
+
+        // Get user from database
+        const user = await getOrCreateUser(userId);
+        
+        // Get all numbers for this user from NumbersList
+        const numbers = await prisma.numbersList.findMany({
+            where: { userId: user.id },
+            orderBy: { dateTime: 'desc' }
+        });
+
+        res.json({ 
+            success: true,
+            data: numbers 
+        });
+    } catch (error) {
+        console.error("Error getting user numbers:", error);
+        res.status(500).json({ error: "Failed to get user numbers", details: error.message });
+    }
+});
+
+// Get status for a specific activation ID
+app.get("/api/my-numbers/status/:activationId", async (req, res) => {
+    try {
+        const { activationId } = req.params;
+        
+        if (!activationId) {
+            return res.status(400).json({ error: "Activation ID is required" });
+        }
+
+        // Get status from Hero SMS API
+        const result = await heroSmsRequest("getStatus", { id: activationId });
+        
+        if (result.error) {
+            return res.status(400).json({ error: result.error });
+        }
+        
+        // If JSON response (V2)
+        if (result.isJson) {
+            return res.json({ success: true, data: result.data });
+        }
+        
+        // Format: "STATUS_WAIT_CODE" or "STATUS_OK:code" or "STATUS_CANCEL"
+        if (typeof result.data === 'string') {
+            if (result.data.startsWith("STATUS_OK")) {
+                const code = result.data.split(":")[1];
+                res.json({ success: true, data: { status: "OK", code: code } });
+            } else if (result.data === "STATUS_WAIT_CODE") {
+                res.json({ success: true, data: { status: "WAIT_CODE" } });
+            } else if (result.data === "STATUS_CANCEL") {
+                res.json({ success: true, data: { status: "CANCEL" } });
+            } else {
+                res.json({ success: true, data: { status: result.data } });
+            }
+        } else {
+            res.json({ success: true, data: result.data });
+        }
+    } catch (error) {
+        console.error("Error getting status:", error);
+        res.status(500).json({ error: "Failed to get status", details: error.message });
     }
 });
 
@@ -1375,8 +1571,10 @@ app.get("/api/wallet/:userId", async (req, res) => {
         await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
         }
 
-        // Verifică balance-ul real USDT de pe blockchain și sincronizează
+        // Verifică balance-ul real USDT de pe blockchain și detectează USDT nou primit
         let realUSDTBalance = 0;
+        let usdtAdded = 0; // USDT nou adăugat (diferența față de ultima verificare)
+        
         if (wallet.usdt && wallet.usdt.address && ethers.isAddress(wallet.usdt.address)) {
             try {
                 console.log(`[WALLET] Verificare balance real USDT pentru user ${userId}, adresă: ${wallet.usdt.address}`);
@@ -1384,12 +1582,58 @@ app.get("/api/wallet/:userId", async (req, res) => {
                 
                 if (realBalance) {
                     realUSDTBalance = realBalance.balanceNumber;
+                    const previousBalance = parseFloat(wallet.usdt.balance || "0");
                     
-                    if (realBalance.balanceNumber !== parseFloat(wallet.usdt.balance || "0")) {
-                        console.log(`[WALLET] 🔄 Sincronizare balance: ${wallet.usdt.balance} -> ${realBalance.balance} USDT`);
-                        // Actualizează balance-ul cu valoarea reală de pe blockchain
+                    // Detectează dacă s-a primit USDT nou (balance real > balance din fișier)
+                    if (realUSDTBalance > previousBalance) {
+                        usdtAdded = realUSDTBalance - previousBalance;
+                        console.log(`[WALLET] 💰 USDT nou detectat: ${usdtAdded.toFixed(6)} USDT (${previousBalance} -> ${realUSDTBalance})`);
+                        
+                        // Adaugă USDT nou la SummDolar (doar o dată pe tranzacție)
+                        const baseBalance = user.SummDolar || 0;
+                        const newSummDolar = baseBalance + usdtAdded;
+                        
+                        try {
+                            // Actualizează SummDolar în baza de date
+                            await prisma.users.update({
+                                where: { id: user.id },
+                                data: { SummDolar: newSummDolar }
+                            });
+                            
+                            console.log(`[WALLET] ✅ SummDolar actualizat: ${baseBalance.toFixed(2)} -> ${newSummDolar.toFixed(2)} USD (+${usdtAdded.toFixed(6)} USDT)`);
+                            
+                            // Salvează tranzacția în MoneyHistory
+                            await prisma.moneyHistory.create({
+                                data: {
+                                    userId: user.id,
+                                    amount: usdtAdded,
+                                    action: `USDT deposit: +${usdtAdded.toFixed(6)} USDT from blockchain`
+                                }
+                            });
+                            
+                            console.log(`[WALLET] ✅ Transaction recorded: +${usdtAdded.toFixed(6)} USDT`);
+                            
+                            // Actualizează user object pentru a reflecta noul SummDolar
+                            user.SummDolar = newSummDolar;
+                            
+                            // IMPORTANT: Actualizează balance-ul în fișier IMEDIAT pentru a marca că am procesat această tranzacție
+                            // Astfel, la următorul request nu se va mai adăuga din nou
+                            wallet.usdt.balance = realBalance.balance;
+                            await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
+                            console.log(`[WALLET] ✅ Balance actualizat în fișier pentru a preveni dublarea`);
+                        } catch (dbError) {
+                            console.error(`[WALLET] ❌ Eroare la actualizarea SummDolar:`, dbError.message);
+                            // Continuă chiar dacă actualizarea BD a eșuat
+                        }
+                    } else if (realUSDTBalance < previousBalance) {
+                        // Dacă balance-ul a scăzut (transfer out), doar sincronizăm fișierul
+                        console.log(`[WALLET] ⚠️ Balance USDT a scăzut: ${previousBalance} -> ${realUSDTBalance} USDT`);
                         wallet.usdt.balance = realBalance.balance;
-                        // Salvează în fișier
+                        await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
+                    } else if (realUSDTBalance !== previousBalance) {
+                        // Dacă balance-ul s-a schimbat dar nu e mai mare (edge case), sincronizăm
+                        console.log(`[WALLET] 🔄 Sincronizare balance: ${previousBalance} -> ${realUSDTBalance} USDT`);
+                        wallet.usdt.balance = realBalance.balance;
                         await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
                         console.log(`[WALLET] ✅ Balance sincronizat cu blockchain`);
                     } else {
@@ -1399,7 +1643,6 @@ app.get("/api/wallet/:userId", async (req, res) => {
             } catch (error) {
                 console.error(`[WALLET] ⚠️ Eroare la sincronizarea balance-ului real:`, error.message);
                 // Continuă cu balance-ul din fișier dacă verificarea eșuează
-                // Folosim balance-ul din fișier ca fallback
                 realUSDTBalance = parseFloat(wallet.usdt.balance || "0");
             }
         } else {
@@ -1407,11 +1650,14 @@ app.get("/api/wallet/:userId", async (req, res) => {
             realUSDTBalance = parseFloat(wallet.usdt?.balance || "0");
         }
 
-        // Calculăm total balance = SummDolar (suma de bază) + balance USDT real de pe blockchain
-        const baseBalance = user.SummDolar || 0;
-        const totalBalance = baseBalance + realUSDTBalance;
+        // Calculăm total balance
+        // SummDolar include deja toate USDT-urile adăugate anterior (inclusiv cele adăugate acum)
+        // Dacă s-a adăugat USDT nou în această sesiune, SummDolar a fost deja actualizat cu USDT nou
+        // Deci Total = SummDolar (care include deja toate USDT-urile adăugate)
+        const currentSummDolar = user.SummDolar || 0;
+        const totalBalance = currentSummDolar;
         
-        console.log(`[WALLET] 💰 Total balance calculat: ${baseBalance} (SummDolar) + ${realUSDTBalance} (USDT real) = ${totalBalance} USD`);
+        console.log(`[WALLET] 💰 Total balance: ${totalBalance.toFixed(2)} USD (SummDolar care include ${usdtAdded > 0 ? `+${usdtAdded.toFixed(6)} USDT adăugat` : 'toate USDT-urile'})`);
 
         res.json({ 
             success: true, 
