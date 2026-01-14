@@ -29,11 +29,11 @@ function Home() {
       </div>
 
       <div className="menu-grid">
-        <div className="menu-card" onClick={() => navigate('/rent')}>
+        {/* <div className="menu-card" onClick={() => navigate('/rent')}>
           <div className="menu-icon">🏠</div>
           <h3>{t('home.rent')}</h3>
           <p>{t('home.rentDesc')}</p>
-        </div>
+        </div> */}
 
         <div className="menu-card" onClick={() => navigate('/activate')}>
           <div className="menu-icon">🔢</div>

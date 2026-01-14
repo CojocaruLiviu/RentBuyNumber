@@ -25,6 +25,8 @@ function Activate() {
   const [statusInfo, setStatusInfo] = useState(null);
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [resendingSms, setResendingSms] = useState(false);
+  const [resendSmsUsed, setResendSmsUsed] = useState(false);
   
   // Search states
   const [serviceSearch, setServiceSearch] = useState('');
@@ -332,6 +334,31 @@ function Activate() {
     }
   };
 
+  const handleResendSms = async () => {
+    if (!activation?.id) return;
+
+    setResendingSms(true);
+    setError('');
+
+    try {
+      const response = await apiClient.post(`/resend-sms/${activation.id}`);
+      
+      if (response.data.error) {
+        setError(response.data.error);
+      } else if (response.data.success) {
+        // Mark as used so button becomes disabled
+        setResendSmsUsed(true);
+        alert('SMS resend requested successfully!');
+      } else {
+        setError('Failed to request SMS resend');
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to request SMS resend');
+    } finally {
+      setResendingSms(false);
+    }
+  };
+
   const handleCancelActivation = async () => {
     if (!activation?.id) return;
 
@@ -360,7 +387,14 @@ function Activate() {
       });
 
       if (response.data.error) {
-        setError(response.data.error);
+        const errorMsg = response.data.error;
+        // Check for EARLY_CANCEL_DENIED error
+        if (errorMsg.includes('EARLY_CANCEL_DENIED') || errorMsg.includes('EARLY_CANCEL')) {
+          alert('⏳ Wait 2 minutes before cancel');
+          setError('Please wait 2 minutes before canceling this activation.');
+        } else {
+          setError(errorMsg);
+        }
       } else if (response.data.success) {
         const message = response.data.message || 'Activation cancelled successfully';
         if (response.data.refundAmount) {
@@ -379,7 +413,14 @@ function Activate() {
         setError(response.data.message || 'Failed to cancel activation');
       }
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to cancel activation');
+      const errorMsg = err.response?.data?.error || 'Failed to cancel activation';
+      // Check for EARLY_CANCEL_DENIED error
+      if (errorMsg.includes('EARLY_CANCEL_DENIED') || errorMsg.includes('EARLY_CANCEL')) {
+        alert('⏳ Wait 2 minutes before cancel');
+        setError('Please wait 2 minutes before canceling this activation.');
+      } else {
+        setError(errorMsg);
+      }
     } finally {
       setCancelling(false);
     }
@@ -406,7 +447,7 @@ function Activate() {
                 type="text"
                 className="input"
                 placeholder="Search service..."
-                value={serviceSearch !== null && serviceSearch !== undefined ? serviceSearch : (selectedService ? services.find(s => (s.id || s.name) === selectedService)?.name || selectedService : '')}
+                value={showServiceDropdown && serviceSearch !== null && serviceSearch !== undefined ? serviceSearch : (selectedService ? services.find(s => (s.id || s.name) === selectedService)?.name || selectedService : '')}
                 onChange={(e) => {
                   setServiceSearch(e.target.value);
                   setShowServiceDropdown(true);
@@ -491,7 +532,7 @@ function Activate() {
                     type="text"
                     className="input"
                     placeholder="Search country..."
-                    value={countrySearch !== null && countrySearch !== undefined ? countrySearch : (selectedCountry ? countries.find(c => (c.id || c.code) === selectedCountry)?.name || selectedCountry : '')}
+                    value={showCountryDropdown && countrySearch !== null && countrySearch !== undefined ? countrySearch : (selectedCountry ? countries.find(c => (c.id || c.code) === selectedCountry)?.name || selectedCountry : '')}
                     onChange={(e) => {
                       setCountrySearch(e.target.value);
                       setShowCountryDropdown(true);
@@ -632,17 +673,33 @@ function Activate() {
           {statusInfo && (
             <div className="card" style={{ marginTop: '16px', padding: '12px', backgroundColor: '#f5f5f5' }}>
               <h4>📊 Status Information</h4>
-              <pre style={{ 
-                whiteSpace: 'pre-wrap', 
-                wordBreak: 'break-word',
-                fontSize: '12px',
-                backgroundColor: '#fff',
-                padding: '8px',
-                borderRadius: '4px',
-                marginTop: '8px'
-              }}>
-                {JSON.stringify(statusInfo, null, 2)}
-              </pre>
+              {statusInfo.code ? (
+                <div className="success">
+                  <pre style={{ 
+                    whiteSpace: 'pre-wrap', 
+                    wordBreak: 'break-word',
+                    fontSize: '12px',
+                    backgroundColor: '#fff',
+                    padding: '8px',
+                    borderRadius: '4px',
+                    marginTop: '8px'
+                  }}>
+                    {JSON.stringify(statusInfo, null, 2)}
+                  </pre>
+                </div>
+              ) : (
+                <pre style={{ 
+                  whiteSpace: 'pre-wrap', 
+                  wordBreak: 'break-word',
+                  fontSize: '12px',
+                  backgroundColor: '#fff',
+                  padding: '8px',
+                  borderRadius: '4px',
+                  marginTop: '8px'
+                }}>
+                  {JSON.stringify(statusInfo, null, 2)}
+                </pre>
+              )}
             </div>
           )}
 
@@ -656,6 +713,17 @@ function Activate() {
             >
               {loadingStatus ? 'Loading...' : '🔄 Refresh Status'}
             </button>
+            {/* Show resend button only if code was received and hasn't been used yet */}
+            {statusInfo && statusInfo.status === 'OK' && statusInfo.code && !resendSmsUsed && (
+              <button 
+                className="btn" 
+                onClick={handleResendSms}
+                disabled={resendingSms || resendSmsUsed}
+                style={{ flex: 1, minWidth: '120px' }}
+              >
+                {resendingSms ? 'Requesting...' : resendSmsUsed ? '✅ SMS Resent' : '📨 Resend SMS'}
+              </button>
+            )}
             <button 
               className="btn btn-secondary" 
               onClick={handleCancelActivation}
@@ -674,6 +742,7 @@ function Activate() {
               setActivationCost(null);
               setStatusInfo(null);
               setSelectedService('');
+              setResendSmsUsed(false);
             }}
             style={{ marginTop: '12px', marginBottom: '12px' }}
           >

@@ -35,6 +35,7 @@ const PORT = process.env.PORT || 3000;
 const REACT_APP_API_URL = process.env.REACT_APP_API_URL || `https://smsback.workdomain.site`;
 const HERO_SMS_API_KEY = process.env.HERO_SMS_API_KEY;
 const HERO_SMS_API_URL = process.env.HERO_SMS_API_URL || "https://hero-sms.com/stubs/handler_api.php";
+const FEE_PERCENT = parseFloat(process.env.Fee_percent) || 0; // Fee percentage (e.g., 10 for 10%)
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -1025,6 +1026,40 @@ app.get("/api/sms/:activationId", async (req, res) => {
     }
 });
 
+// Resend SMS (request resending of SMS with status=3)
+app.post("/api/resend-sms/:activationId", async (req, res) => {
+    try {
+        const { activationId } = req.params;
+        
+        if (!activationId) {
+            return res.status(400).json({ error: "Activation ID is required" });
+        }
+
+        // Format: ?action=setStatus&api_key=KEY&id=123456789&status=3
+        // Status 3 = request resending of SMS
+        const result = await heroSmsRequest("setStatus", { 
+            id: activationId,
+            status: 3
+        });
+        
+        if (result.error) {
+            return res.status(400).json({ error: result.error });
+        }
+        
+        res.json({ 
+            success: true, 
+            message: "SMS resend requested successfully",
+            data: result.data
+        });
+    } catch (error) {
+        console.error("Error requesting SMS resend:", error);
+        res.status(500).json({ 
+            error: "Failed to request SMS resend", 
+            details: error.message 
+        });
+    }
+});
+
 // Cancel activation
 app.post("/api/cancel/:activationId", async (req, res) => {
     const { activationId } = req.params;
@@ -1507,6 +1542,31 @@ function getBSCProvider() {
 /**
  * Verifică balance-ul real USDT de pe blockchain (BSC)
  */
+// Helper function to remove privateKey from wallet before sending to client
+function sanitizeWallet(wallet) {
+    if (!wallet) return wallet;
+    
+    const sanitized = { ...wallet };
+    
+    // Remove privateKey from btc, eth, and usdt if they exist
+    if (sanitized.btc && sanitized.btc.privateKey) {
+        const { privateKey, ...btcWithoutKey } = sanitized.btc;
+        sanitized.btc = btcWithoutKey;
+    }
+    
+    if (sanitized.eth && sanitized.eth.privateKey) {
+        const { privateKey, ...ethWithoutKey } = sanitized.eth;
+        sanitized.eth = ethWithoutKey;
+    }
+    
+    if (sanitized.usdt && sanitized.usdt.privateKey) {
+        const { privateKey, ...usdtWithoutKey } = sanitized.usdt;
+        sanitized.usdt = usdtWithoutKey;
+    }
+    
+    return sanitized;
+}
+
 async function getRealUSDTBalance(address) {
     try {
         if (!address || !ethers.isAddress(address)) {
@@ -1589,9 +1649,17 @@ app.get("/api/wallet/:userId", async (req, res) => {
                         usdtAdded = realUSDTBalance - previousBalance;
                         console.log(`[WALLET] 💰 USDT nou detectat: ${usdtAdded.toFixed(6)} USDT (${previousBalance} -> ${realUSDTBalance})`);
                         
-                        // Adaugă USDT nou la SummDolar (doar o dată pe tranzacție)
+                        // Calculează fee-ul și suma netă de adăugat
+                        const feeAmount = (usdtAdded * FEE_PERCENT) / 100;
+                        const usdtAfterFee = usdtAdded - feeAmount;
+                        
+                        if (FEE_PERCENT > 0) {
+                            console.log(`[WALLET] 💸 Fee aplicat: ${FEE_PERCENT}% = ${feeAmount.toFixed(6)} USDT (${usdtAdded.toFixed(6)} -> ${usdtAfterFee.toFixed(6)} USDT)`);
+                        }
+                        
+                        // Adaugă USDT nou la SummDolar (doar o dată pe tranzacție) - după deducerea fee-ului
                         const baseBalance = user.SummDolar || 0;
-                        const newSummDolar = baseBalance + usdtAdded;
+                        const newSummDolar = baseBalance + usdtAfterFee;
                         
                         try {
                             // Actualizează SummDolar în baza de date
@@ -1600,18 +1668,22 @@ app.get("/api/wallet/:userId", async (req, res) => {
                                 data: { SummDolar: newSummDolar }
                             });
                             
-                            console.log(`[WALLET] ✅ SummDolar actualizat: ${baseBalance.toFixed(2)} -> ${newSummDolar.toFixed(2)} USD (+${usdtAdded.toFixed(6)} USDT)`);
+                            console.log(`[WALLET] ✅ SummDolar actualizat: ${baseBalance.toFixed(2)} -> ${newSummDolar.toFixed(2)} USD (+${usdtAfterFee.toFixed(6)} USDT${FEE_PERCENT > 0 ? `, fee ${FEE_PERCENT}%: -${feeAmount.toFixed(6)} USDT` : ''})`);
                             
                             // Salvează tranzacția în MoneyHistory
+                            const actionText = FEE_PERCENT > 0 
+                                ? `USDT deposit: +${usdtAdded.toFixed(6)} USDT from blockchain (fee ${FEE_PERCENT}%: -${feeAmount.toFixed(6)} USDT, net: +${usdtAfterFee.toFixed(6)} USDT)`
+                                : `USDT deposit: +${usdtAdded.toFixed(6)} USDT from blockchain`;
+                            
                             await prisma.moneyHistory.create({
                                 data: {
                                     userId: user.id,
-                                    amount: usdtAdded,
-                                    action: `USDT deposit: +${usdtAdded.toFixed(6)} USDT from blockchain`
+                                    amount: usdtAfterFee, // Salvează suma netă (după fee)
+                                    action: actionText
                                 }
                             });
                             
-                            console.log(`[WALLET] ✅ Transaction recorded: +${usdtAdded.toFixed(6)} USDT`);
+                            console.log(`[WALLET] ✅ Transaction recorded: +${usdtAfterFee.toFixed(6)} USDT${FEE_PERCENT > 0 ? ` (original: ${usdtAdded.toFixed(6)} USDT, fee: ${feeAmount.toFixed(6)} USDT)` : ''}`);
                             
                             // Actualizează user object pentru a reflecta noul SummDolar
                             user.SummDolar = newSummDolar;
@@ -1659,9 +1731,12 @@ app.get("/api/wallet/:userId", async (req, res) => {
         
         console.log(`[WALLET] 💰 Total balance: ${totalBalance.toFixed(2)} USD (SummDolar care include ${usdtAdded > 0 ? `+${usdtAdded.toFixed(6)} USDT adăugat` : 'toate USDT-urile'})`);
 
+        // Remove privateKey from wallet before sending to client
+        const sanitizedWallet = sanitizeWallet(wallet);
+
         res.json({ 
             success: true, 
-            wallet,
+            wallet: sanitizedWallet,
             totalBalance: totalBalance // Total balance in USD from database
         });
     } catch (error) {
@@ -1703,7 +1778,10 @@ app.post("/api/wallet/:userId", async (req, res) => {
         // Save wallet
         await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
 
-        res.json({ success: true, wallet });
+        // Remove privateKey from wallet before sending to client
+        const sanitizedWallet = sanitizeWallet(wallet);
+
+        res.json({ success: true, wallet: sanitizedWallet });
     } catch (error) {
         console.error("Error saving wallet:", error);
         res.status(500).json({ error: "Failed to save wallet", details: error.message });
@@ -1743,7 +1821,10 @@ app.put("/api/wallet/:userId", async (req, res) => {
         // Save wallet
         await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
 
-        res.json({ success: true, wallet });
+        // Remove privateKey from wallet before sending to client
+        const sanitizedWallet = sanitizeWallet(wallet);
+
+        res.json({ success: true, wallet: sanitizedWallet });
     } catch (error) {
         console.error("Error updating wallet:", error);
         res.status(500).json({ error: "Failed to update wallet", details: error.message });
@@ -1773,7 +1854,10 @@ app.post("/api/wallet/:userId/init", async (req, res) => {
             let wallet = normalizeWallet({}, userId);
             await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
             console.log("[WALLET_INIT] Wallet file created for user:", userId);
-            return res.json({ success: true, wallet, created: true });
+            
+            // Remove privateKey from wallet before sending to client
+            const sanitizedWallet = sanitizeWallet(wallet);
+            return res.json({ success: true, wallet: sanitizedWallet, created: true });
         }
 
         // Return existing wallet (normalized)
@@ -1784,7 +1868,10 @@ app.post("/api/wallet/:userId/init", async (req, res) => {
         await fs.writeFile(walletPath, JSON.stringify(wallet, null, 2), "utf8");
         
         console.log("[WALLET_INIT] Wallet already exists for user:", userId);
-        res.json({ success: true, wallet, created: false });
+        
+        // Remove privateKey from wallet before sending to client
+        const sanitizedWallet = sanitizeWallet(wallet);
+        res.json({ success: true, wallet: sanitizedWallet, created: false });
     } catch (error) {
         console.error("[WALLET_INIT] Error initializing wallet for user:", req.params.userId, error);
         res.status(500).json({ error: "Failed to initialize wallet", details: error.message });

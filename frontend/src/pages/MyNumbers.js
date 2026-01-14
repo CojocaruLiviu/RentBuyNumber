@@ -21,6 +21,8 @@ function MyNumbers() {
   const [extendingId, setExtendingId] = useState(null);
   const [cancelling, setCancelling] = useState({});
   const [refreshingAll, setRefreshingAll] = useState(false);
+  const [resendingSms, setResendingSms] = useState({});
+  const [resendSmsUsed, setResendSmsUsed] = useState({});
 
   useEffect(() => {
     if (WebApp.BackButton) {
@@ -83,7 +85,9 @@ function MyNumbers() {
         setRented(rentedResponse.data.data || rentedResponse.data || []);
       }
     } catch (err) {
+
       // setError('Failed to load numbers');
+
     } finally {
       setLoading(false);
     }
@@ -170,6 +174,34 @@ function MyNumbers() {
     }
   };
 
+  const handleResendSms = async (numberId, activationId) => {
+    if (!activationId) {
+      setError('Activation ID not available for this number.');
+      return;
+    }
+
+    setResendingSms(prev => ({ ...prev, [numberId]: true }));
+    setError('');
+
+    try {
+      const response = await apiClient.post(`/resend-sms/${activationId}`);
+      
+      if (response.data.error) {
+        setError(response.data.error);
+      } else if (response.data.success) {
+        // Mark as used so button becomes disabled
+        setResendSmsUsed(prev => ({ ...prev, [numberId]: true }));
+        alert('SMS resend requested successfully!');
+      } else {
+        setError('Failed to request SMS resend');
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to request SMS resend');
+    } finally {
+      setResendingSms(prev => ({ ...prev, [numberId]: false }));
+    }
+  };
+
   const handleCancelNumber = async (numberId, activationId, cost) => {
     const userId = WebApp.initDataUnsafe?.user?.id || WebApp.initDataUnsafe?.user_id;
     if (!userId) {
@@ -201,7 +233,14 @@ function MyNumbers() {
       });
 
       if (response.data.error) {
-        setError(response.data.error);
+        const errorMsg = response.data.error;
+        // Check for EARLY_CANCEL_DENIED error
+        if (errorMsg.includes('EARLY_CANCEL_DENIED') || errorMsg.includes('EARLY_CANCEL')) {
+          alert('⏳ Wait 2 minutes before cancel');
+          setError('Please wait 2 minutes before canceling this number.');
+        } else {
+          setError(errorMsg);
+        }
       } else if (response.data.success) {
         const message = response.data.message || 'Number cancelled successfully';
         if (response.data.refundAmount) {
@@ -216,7 +255,14 @@ function MyNumbers() {
         setError(response.data.message || 'Failed to cancel number');
       }
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to cancel number');
+      const errorMsg = err.response?.data?.error || 'Failed to cancel number';
+      // Check for EARLY_CANCEL_DENIED error
+      if (errorMsg.includes('EARLY_CANCEL_DENIED') || errorMsg.includes('EARLY_CANCEL')) {
+        alert('⏳ Wait 2 minutes before cancel');
+        setError('Please wait 2 minutes before canceling this number.');
+      } else {
+        setError(errorMsg);
+      }
     } finally {
       setCancelling(prev => ({ ...prev, [numberId]: false }));
     }
@@ -303,17 +349,43 @@ function MyNumbers() {
                   const numStatus = statusInfo[num.id];
                   const isLoadingStatus = loadingStatus[num.id];
                   const isCancelling = cancelling[num.id];
+                  const isResendingSms = resendingSms[num.id];
+                  const hasResendSmsBeenUsed = resendSmsUsed[num.id];
+                  
+                  // Check if status is WRONG_ACTIVATION_ID
+                  const isWrongActivationId = numStatus && (
+                    numStatus.status === 'WRONG_ACTIVATION_ID' || 
+                    (typeof numStatus === 'object' && numStatus.status === 'WRONG_ACTIVATION_ID')
+                  );
+                  
+                  // Check if code has been received (status OK with code)
+                  const hasReceivedCode = numStatus && (
+                    (numStatus.status === 'OK' && numStatus.code) ||
+                    (typeof numStatus === 'object' && numStatus.status === 'OK' && numStatus.code)
+                  );
+                  
+                  // Check if status is CANCEL
+                  const isCanceled = numStatus && (
+                    numStatus.status === 'CANCEL' ||
+                    (typeof numStatus === 'object' && numStatus.status === 'CANCEL' && numStatus.status === 'WRONG_ACTIVATION_ID')
+                  );
+                  
+                  // Show resend button only if code was received and hasn't been used yet
+                  const canResendSms = hasReceivedCode && !hasResendSmsBeenUsed;
+                  
+                  // Only show activationId, cost, and buttons if not WRONG_ACTIVATION_ID
+                  const showActivationDetails = num.activationId && !isWrongActivationId;
                   
                   return (
                     <div key={num.id || idx} className="card" style={{ marginBottom: '16px' }}>
                       <p><strong>Number:</strong> +{num.number}</p>
                       <p><strong>Status:</strong> {num.statusNum}</p>
-                      {num.activationId && <p><strong>Activation ID:</strong> {num.activationId}</p>}
-                      {num.cost && <p><strong>Cost:</strong> ${num.cost.toFixed(4)} USD</p>}
+                      {showActivationDetails && <p><strong>Activation ID:</strong> {num.activationId}</p>}
+                      {showActivationDetails && num.cost && <p><strong>Cost:</strong> ${num.cost.toFixed(4)} USD</p>}
                       {num.dateTime && <p><strong>Date:</strong> {new Date(num.dateTime).toLocaleString()}</p>}
                       
                       {/* Status Information */}
-                      {numStatus && (
+                      {numStatus && !isWrongActivationId && (
                         <div style={{ marginTop: '12px', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
                           <h4 style={{ marginBottom: '8px' }}>📊 Status Information</h4>
                           {numStatus.code ? (
@@ -338,30 +410,38 @@ function MyNumbers() {
                         </div>
                       )}
                       
-                      <div style={{ display: 'flex', gap: '8px', marginTop: '12px', flexWrap: 'wrap' }}>
-                        {num.activationId && (
-                          <>
+                      {showActivationDetails && !isCanceled && (
+                        <div style={{ display: 'flex', gap: '8px', marginTop: '12px', flexWrap: 'wrap' }}>
+                          <button 
+                            className="btn btn-secondary" 
+                            onClick={() => handleRefreshStatus(num.id, num.activationId)}
+                            disabled={isLoadingStatus}
+                            style={{ flex: 1, minWidth: '120px' }}
+                          >
+                            {isLoadingStatus ? 'Loading...' : '🔄 Refresh Status'}
+                          </button>
+                          {canResendSms && (
                             <button 
-                              className="btn btn-secondary" 
-                              onClick={() => handleRefreshStatus(num.id, num.activationId)}
-                              disabled={isLoadingStatus}
+                              className="btn" 
+                              onClick={() => handleResendSms(num.id, num.activationId)}
+                              disabled={isResendingSms || hasResendSmsBeenUsed}
                               style={{ flex: 1, minWidth: '120px' }}
                             >
-                              {isLoadingStatus ? 'Loading...' : '🔄 Refresh Status'}
+                              {isResendingSms ? 'Requesting...' : hasResendSmsBeenUsed ? '✅ SMS Resent' : '📨 Resend SMS'}
                             </button>
-                            {num.cost && (
-                              <button 
-                                className="btn" 
-                                onClick={() => handleCancelNumber(num.id, num.activationId, num.cost)}
-                                disabled={isCancelling}
-                                style={{ flex: 1, minWidth: '120px' }}
-                              >
-                                {isCancelling ? 'Cancelling...' : '❌ Cancel & Refund'}
-                              </button>
-                            )}
-                          </>
-                        )}
-                      </div>
+                          )}
+                          {num.cost && (
+                            <button 
+                              className="btn" 
+                              onClick={() => handleCancelNumber(num.id, num.activationId, num.cost)}
+                              disabled={isCancelling}
+                              style={{ flex: 1, minWidth: '120px' }}
+                            >
+                              {isCancelling ? 'Cancelling...' : '❌ Cancel & Refund'}
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
